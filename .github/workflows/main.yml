@@ -1,20 +1,25 @@
 name: Fetch IP Addresses
 
 on:
+  # 每3小时运行一次
   schedule:
-    - cron: '0 */3 * * *'   # 每3小时运行一次
-  workflow_dispatch:         # 手动触发
+    - cron: '0 */3 * * *'
+  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   fetch-ips:
     runs-on: ubuntu-latest
+    
+    # 需要写入权限
     permissions:
       contents: write
-
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        # 获取完整历史记录，以便后续提交
         fetch-depth: 0
 
     - name: Set up Python
@@ -25,15 +30,17 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests
+        pip install requests beautifulsoup4
 
     - name: Run IP fetcher script
       run: |
         cat > fetch_ips.py << 'EOF'
         import requests
         import re
-        import datetime
+        import os
+        import json
 
+        # 目标URL列表
         urls = [
             'https://ip.164746.xyz', 
             'https://cf.090227.xyz', 
@@ -41,75 +48,91 @@ jobs:
             'https://www.wetest.vip/page/cloudflare/address_v4.html'
         ]
 
-        ip_pattern = r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b'
+        # 正则表达式用于匹配IP地址
+        ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+
+        # 使用集合存储IP地址实现自动去重
         unique_ips = set()
 
-        # 抓取IP
         for url in urls:
             try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                resp = requests.get(url, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    matches = re.findall(ip_pattern, resp.text, re.IGNORECASE)
-                    unique_ips.update(matches)
-                    print(f"[INFO] {url} 提取 {len(matches)} 个 IP")
+                # 添加User-Agent头以避免被某些网站阻止
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                # 发送HTTP请求获取网页内容
+                response = requests.get(url, headers=headers, timeout=10)
+                
+                # 确保请求成功
+                if response.status_code == 200:
+                    # 获取网页的文本内容
+                    html_content = response.text
+                    
+                    # 使用正则表达式查找IP地址
+                    ip_matches = re.findall(ip_pattern, html_content, re.IGNORECASE)
+                    
+                    # 将找到的IP添加到集合中（自动去重）
+                    unique_ips.update(ip_matches)
+                    print(f'从 {url} 找到 {len(ip_matches)} 个IP地址')
                 else:
-                    print(f"[WARN] {url} 状态码 {resp.status_code}")
-            except Exception as e:
-                print(f"[ERROR] 请求 {url} 出错: {e}")
+                    print(f'请求 {url} 失败，状态码: {response.status_code}')
+            except requests.exceptions.RequestException as e:
+                print(f'请求 {url} 失败: {e}')
+                continue
 
-        # 批量查询国家
-        def batch_get_country(ip_list):
-            result = {}
-            if not ip_list:
-                return result
+        # 获取IP地理位置信息的函数
+        def get_ip_location(ip):
             try:
-                url = "http://ip-api.com/batch?lang=zh-CN"
-                resp = requests.post(url, json=ip_list, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    for item in data:
-                        ip = item.get("query")
-                        if item.get("status") == "success":
-                            result[ip] = item.get("country", "未知")
-                        else:
-                            result[ip] = "未知"
+                response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode", timeout=5)
+                data = response.json()
+                
+                if data.get('status') == 'success':
+                    country = data.get('country', '未知')
+                    return f"{ip}#{country}"
                 else:
-                    print(f"[WARN] 批量查询失败 HTTP {resp.status_code}")
-            except Exception as e:
-                print(f"[ERROR] 批量查询失败: {e}")
-            return result
+                    return f"{ip}#未知位置"
+            except:
+                return f"{ip}#未知位置"
 
-        sorted_ips = sorted(unique_ips, key=lambda ip: [int(p) for p in ip.split('.')]) if unique_ips else []
-
-        all_results = {}
-        batch_size = 100
-        for i in range(0, len(sorted_ips), batch_size):
-            batch = sorted_ips[i:i+batch_size]
-            results = batch_get_country(batch)
-            all_results.update(results)
-
-        # 写入文件
-        with open("ip.txt", "w", encoding="utf-8") as f:
-            if sorted_ips:
-                for ip in sorted_ips:
-                    country = all_results.get(ip, "未知")
-                    f.write(f"{ip}#{country}\\n")
-            else:
-                f.write("# 没有抓到任何IP\\n")
-
-            # 追加更新时间，确保文件每次都有变化
-            f.write(f"# 更新于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n")
-
-        print(f"[OK] 写入 ip.txt，共 {len(sorted_ips)} 个 IP")
+        # 将去重后的IP地址按数字顺序排序并添加位置信息后写入文件
+        if unique_ips:
+            # 按IP地址的数字顺序排序（非字符串顺序）
+            sorted_ips = sorted(unique_ips, key=lambda ip: [int(part) for part in ip.split('.')])
+            
+            # 为每个IP获取地理位置信息
+            ip_with_location = []
+            for ip in sorted_ips:
+                ip_with_location.append(get_ip_location(ip))
+                print(f"获取 {ip} 的地理位置信息")
+            
+            with open('ip.txt', 'w') as file:
+                for ip_line in ip_with_location:
+                    file.write(ip_line + '\n')
+            print(f'已保存 {len(ip_with_location)} 个带位置信息的IP地址到ip.txt文件。')
+        else:
+            print('未找到有效的IP地址。')
+            # 创建一个空文件，避免后续步骤出错
+            with open('ip.txt', 'w') as file:
+                file.write('')
         EOF
-
+        
         python fetch_ips.py
 
-    - name: Commit and push changes
+    - name: Check for changes
+      id: git-check
+      run: |
+        if git diff --quiet; then
+          echo "changed=false" >> $GITHUB_OUTPUT
+        else
+          echo "changed=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Commit and push if changed
+      if: steps.git-check.outputs.changed == 'true'
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add ip.txt
-        git commit -m "Auto-update IP addresses - $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
+        git commit -m "Auto-update IP addresses - $(date +'%Y-%m-%d %H:%M:%S')"
         git push
