@@ -1,20 +1,16 @@
 name: Fetch IP Addresses
 
 on:
-  # 每3小时运行一次
   schedule:
-    - cron: '0 */3 * * *'
-  # 允许手动触发
-  workflow_dispatch:
+    - cron: '0 */3 * * *'   # 每3小时运行一次
+  workflow_dispatch:         # 手动触发
 
 jobs:
   fetch-ips:
     runs-on: ubuntu-latest
-    
-    # 需要写入权限
     permissions:
       contents: write
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -36,7 +32,7 @@ jobs:
         cat > fetch_ips.py << 'EOF'
         import requests
         import re
-        import time
+        import datetime
 
         urls = [
             'https://ip.164746.xyz', 
@@ -48,6 +44,7 @@ jobs:
         ip_pattern = r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b'
         unique_ips = set()
 
+        # 抓取IP
         for url in urls:
             try:
                 headers = {'User-Agent': 'Mozilla/5.0'}
@@ -55,53 +52,64 @@ jobs:
                 if resp.status_code == 200:
                     matches = re.findall(ip_pattern, resp.text, re.IGNORECASE)
                     unique_ips.update(matches)
-                    print(f"从 {url} 找到 {len(matches)} 个IP")
+                    print(f"[INFO] {url} 提取 {len(matches)} 个 IP")
                 else:
-                    print(f"请求 {url} 失败: {resp.status_code}")
+                    print(f"[WARN] {url} 状态码 {resp.status_code}")
             except Exception as e:
-                print(f"请求 {url} 出错: {e}")
+                print(f"[ERROR] 请求 {url} 出错: {e}")
 
-        def get_country(ip):
+        # 批量查询国家
+        def batch_get_country(ip_list):
+            result = {}
+            if not ip_list:
+                return result
             try:
-                r = requests.get(f"http://ip-api.com/json/{ip}?lang=zh-CN", timeout=5)
-                if r.status_code == 200:
-                    data = r.json()
-                    if data.get("status") == "success":
-                        return data.get("country", "未知")
+                url = "http://ip-api.com/batch?lang=zh-CN"
+                resp = requests.post(url, json=ip_list, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data:
+                        ip = item.get("query")
+                        if item.get("status") == "success":
+                            result[ip] = item.get("country", "未知")
+                        else:
+                            result[ip] = "未知"
+                else:
+                    print(f"[WARN] 批量查询失败 HTTP {resp.status_code}")
             except Exception as e:
-                print(f"查询 {ip} 失败: {e}")
-            return "未知"
+                print(f"[ERROR] 批量查询失败: {e}")
+            return result
 
-        if unique_ips:
-            sorted_ips = sorted(unique_ips, key=lambda ip: [int(p) for p in ip.split('.')])
-            with open("ip.txt", "w", encoding="utf-8") as f:
+        sorted_ips = sorted(unique_ips, key=lambda ip: [int(p) for p in ip.split('.')]) if unique_ips else []
+
+        all_results = {}
+        batch_size = 100
+        for i in range(0, len(sorted_ips), batch_size):
+            batch = sorted_ips[i:i+batch_size]
+            results = batch_get_country(batch)
+            all_results.update(results)
+
+        # 写入文件
+        with open("ip.txt", "w", encoding="utf-8") as f:
+            if sorted_ips:
                 for ip in sorted_ips:
-                    country = get_country(ip)
+                    country = all_results.get(ip, "未知")
                     f.write(f"{ip}#{country}\\n")
-                    time.sleep(1)  # 防止API调用太快被封
-            print(f"保存 {len(sorted_ips)} 个 IP 到 ip.txt")
-        else:
-            with open("ip.txt", "w") as f:
-                f.write("")
-            print("没有找到有效IP")
+            else:
+                f.write("# 没有抓到任何IP\\n")
+
+            # 追加更新时间，确保文件每次都有变化
+            f.write(f"# 更新于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n")
+
+        print(f"[OK] 写入 ip.txt，共 {len(sorted_ips)} 个 IP")
         EOF
-        
+
         python fetch_ips.py
 
-    - name: Check for changes
-      id: git-check
-      run: |
-        if git diff --quiet; then
-          echo "changed=false" >> $GITHUB_OUTPUT
-        else
-          echo "changed=true" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Commit and push if changed
-      if: steps.git-check.outputs.changed == 'true'
+    - name: Commit and push changes
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add ip.txt
-        git commit -m "Auto-update IP addresses - $(date +'%Y-%m-%d %H:%M:%S')"
+        git commit -m "Auto-update IP addresses - $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
         git push
