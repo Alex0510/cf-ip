@@ -19,7 +19,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        # 获取完整历史记录，以便后续提交
         fetch-depth: 0
 
     - name: Set up Python
@@ -30,18 +29,15 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests beautifulsoup4
+        pip install requests
 
-    - name: Run enhanced IP fetcher script
+    - name: Run IP fetcher script
       run: |
         cat > fetch_ips.py << 'EOF'
         import requests
         import re
-        import os
-        import json
-        from datetime import datetime
+        import time
 
-        # 目标URL列表
         urls = [
             'https://ip.164746.xyz', 
             'https://cf.090227.xyz', 
@@ -49,102 +45,45 @@ jobs:
             'https://www.wetest.vip/page/cloudflare/address_v4.html'
         ]
 
-        # 正则表达式用于匹配IP地址
-        ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
-
-        # 使用集合存储IP地址实现自动去重
+        ip_pattern = r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b'
         unique_ips = set()
 
         for url in urls:
             try:
-                # 添加User-Agent头以避免被某些网站阻止
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-                
-                # 发送HTTP请求获取网页内容
-                response = requests.get(url, headers=headers, timeout=10)
-                
-                # 确保请求成功
-                if response.status_code == 200:
-                    # 获取网页的文本内容
-                    html_content = response.text
-                    
-                    # 使用正则表达式查找IP地址
-                    ip_matches = re.findall(ip_pattern, html_content, re.IGNORECASE)
-                    
-                    # 将找到的IP添加到集合中（自动去重）
-                    unique_ips.update(ip_matches)
-                    print(f'从 {url} 找到 {len(ip_matches)} 个IP地址')
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    matches = re.findall(ip_pattern, resp.text, re.IGNORECASE)
+                    unique_ips.update(matches)
+                    print(f"从 {url} 找到 {len(matches)} 个IP")
                 else:
-                    print(f'请求 {url} 失败，状态码: {response.status_code}')
-            except requests.exceptions.RequestException as e:
-                print(f'请求 {url} 失败: {e}')
-                continue
+                    print(f"请求 {url} 失败: {resp.status_code}")
+            except Exception as e:
+                print(f"请求 {url} 出错: {e}")
 
-        # 将去重后的IP地址按数字顺序排序
+        def get_country(ip):
+            try:
+                r = requests.get(f"http://ip-api.com/json/{ip}?lang=zh-CN", timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("status") == "success":
+                        return data.get("country", "未知")
+            except Exception as e:
+                print(f"查询 {ip} 失败: {e}")
+            return "未知"
+
         if unique_ips:
-            sorted_ips = sorted(unique_ips, key=lambda ip: [int(part) for part in ip.split('.')])
-            
-            # 生成基于IP地址的文件名
-            def generate_filename(ips):
-                if not ips:
-                    return "no_ips.txt"
-                
-                # 如果IP数量较少，直接在文件名中显示
-                if len(ips) <= 5:
-                    base_name = "_".join(ips[:3])
-                    if len(ips) > 3:
-                        base_name += f"_and_{len(ips)-3}_more"
-                    return f"ips_{base_name}.txt"
-                else:
-                    # 对于大量IP，使用范围或计数
-                    first_ip = ips[0].split('.')
-                    last_ip = ips[-1].split('.')
-                    
-                    # 检查是否在同一网段
-                    if first_ip[:2] == last_ip[:2]:
-                        return f"ips_{first_ip[0]}_{first_ip[1]}_x_x_{len(ips)}_addresses.txt"
-                    else:
-                        return f"ips_{len(ips)}_addresses.txt"
-
-            filename = generate_filename(sorted_ips)
-            
-            # 写入主文件
-            with open(filename, 'w') as file:
+            sorted_ips = sorted(unique_ips, key=lambda ip: [int(p) for p in ip.split('.')])
+            with open("ip.txt", "w", encoding="utf-8") as f:
                 for ip in sorted_ips:
-                    file.write(ip + '\n')
-            
-            # 同时保留一个标准名称的副本
-            with open('ip.txt', 'w') as file:
-                for ip in sorted_ips:
-                    file.write(ip + '\n')
-            
-            # 创建元数据文件
-            metadata = {
-                "total_ips": len(sorted_ips),
-                "generated_at": datetime.now().isoformat(),
-                "source_urls": urls,
-                "filename": filename,
-                "ip_range": {
-                    "first": sorted_ips[0],
-                    "last": sorted_ips[-1]
-                }
-            }
-            
-            with open('ip_metadata.json', 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
-            print(f'已保存 {len(sorted_ips)} 个唯一IP地址到 {filename} 和 ip.txt')
-            print(f'IP范围: {sorted_ips[0]} - {sorted_ips[-1]}')
-            
+                    country = get_country(ip)
+                    f.write(f"{ip}#{country}\\n")
+                    time.sleep(1)  # 防止API调用太快被封
+            print(f"保存 {len(sorted_ips)} 个 IP 到 ip.txt")
         else:
-            print('未找到有效的IP地址。')
-            # 创建空文件
-            with open('no_ips.txt', 'w') as file:
-                file.write('')
-            with open('ip.txt', 'w') as file:
-                file.write('')
+            with open("ip.txt", "w") as f:
+                f.write("")
+            print("没有找到有效IP")
         EOF
         
         python fetch_ips.py
@@ -152,11 +91,10 @@ jobs:
     - name: Check for changes
       id: git-check
       run: |
-        # 检查所有相关文件是否有更改
-        if git diff --name-only | grep -E '(ip.txt|ips_.*\.txt|no_ips.txt|ip_metadata.json)'; then
-          echo "changed=true" >> $GITHUB_OUTPUT
-        else
+        if git diff --quiet; then
           echo "changed=false" >> $GITHUB_OUTPUT
+        else
+          echo "changed=true" >> $GITHUB_OUTPUT
         fi
 
     - name: Commit and push if changed
@@ -164,8 +102,6 @@ jobs:
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
-        # 添加所有可能生成的文件
-        git add ip.txt ip_metadata.json || true
-        git add ips_*.txt no_ips.txt || true
+        git add ip.txt
         git commit -m "Auto-update IP addresses - $(date +'%Y-%m-%d %H:%M:%S')"
         git push
