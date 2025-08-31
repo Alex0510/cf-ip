@@ -32,12 +32,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests beautifulsoup4
 
-    - name: Run IP fetcher script
+    - name: Run enhanced IP fetcher script
       run: |
         cat > fetch_ips.py << 'EOF'
         import requests
         import re
         import os
+        import json
+        from datetime import datetime
 
         # 目标URL列表
         urls = [
@@ -80,18 +82,67 @@ jobs:
                 print(f'请求 {url} 失败: {e}')
                 continue
 
-        # 将去重后的IP地址按数字顺序排序后写入文件
+        # 将去重后的IP地址按数字顺序排序
         if unique_ips:
-            # 按IP地址的数字顺序排序（非字符串顺序）
             sorted_ips = sorted(unique_ips, key=lambda ip: [int(part) for part in ip.split('.')])
             
+            # 生成基于IP地址的文件名
+            def generate_filename(ips):
+                if not ips:
+                    return "no_ips.txt"
+                
+                # 如果IP数量较少，直接在文件名中显示
+                if len(ips) <= 5:
+                    base_name = "_".join(ips[:3])
+                    if len(ips) > 3:
+                        base_name += f"_and_{len(ips)-3}_more"
+                    return f"ips_{base_name}.txt"
+                else:
+                    # 对于大量IP，使用范围或计数
+                    first_ip = ips[0].split('.')
+                    last_ip = ips[-1].split('.')
+                    
+                    # 检查是否在同一网段
+                    if first_ip[:2] == last_ip[:2]:
+                        return f"ips_{first_ip[0]}_{first_ip[1]}_x_x_{len(ips)}_addresses.txt"
+                    else:
+                        return f"ips_{len(ips)}_addresses.txt"
+
+            filename = generate_filename(sorted_ips)
+            
+            # 写入主文件
+            with open(filename, 'w') as file:
+                for ip in sorted_ips:
+                    file.write(ip + '\n')
+            
+            # 同时保留一个标准名称的副本
             with open('ip.txt', 'w') as file:
                 for ip in sorted_ips:
                     file.write(ip + '\n')
-            print(f'已保存 {len(sorted_ips)} 个唯一IP地址到ip.txt文件。')
+            
+            # 创建元数据文件
+            metadata = {
+                "total_ips": len(sorted_ips),
+                "generated_at": datetime.now().isoformat(),
+                "source_urls": urls,
+                "filename": filename,
+                "ip_range": {
+                    "first": sorted_ips[0],
+                    "last": sorted_ips[-1]
+                }
+            }
+            
+            with open('ip_metadata.json', 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            print(f'已保存 {len(sorted_ips)} 个唯一IP地址到 {filename} 和 ip.txt')
+            print(f'IP范围: {sorted_ips[0]} - {sorted_ips[-1]}')
+            
         else:
             print('未找到有效的IP地址。')
-            # 创建一个空文件，避免后续步骤出错
+            # 创建空文件
+            with open('no_ips.txt', 'w') as file:
+                file.write('')
             with open('ip.txt', 'w') as file:
                 file.write('')
         EOF
@@ -101,10 +152,11 @@ jobs:
     - name: Check for changes
       id: git-check
       run: |
-        if git diff --quiet; then
-          echo "changed=false" >> $GITHUB_OUTPUT
-        else
+        # 检查所有相关文件是否有更改
+        if git diff --name-only | grep -E '(ip.txt|ips_.*\.txt|no_ips.txt|ip_metadata.json)'; then
           echo "changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
         fi
 
     - name: Commit and push if changed
@@ -112,6 +164,8 @@ jobs:
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
-        git add ip.txt
+        # 添加所有可能生成的文件
+        git add ip.txt ip_metadata.json || true
+        git add ips_*.txt no_ips.txt || true
         git commit -m "Auto-update IP addresses - $(date +'%Y-%m-%d %H:%M:%S')"
         git push
