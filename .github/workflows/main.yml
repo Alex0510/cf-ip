@@ -55,7 +55,7 @@ jobs:
         ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 
         # 使用集合存储IP地址实现自动去重
-        unique_ips = set()
+        all_ips = set()
 
         for url in urls:
             try:
@@ -75,8 +75,8 @@ jobs:
                     # 使用正则表达式查找IP地址
                     ip_matches = re.findall(ip_pattern, html_content, re.IGNORECASE)
                     
-                    # 将找到的IP添加到集合中（自动去重）
-                    unique_ips.update(ip_matches)
+                    # 将找到的IP添加到集合中
+                    all_ips.update(ip_matches)
                     print(f'从 {url} 找到 {len(ip_matches)} 个IP地址')
                 else:
                     print(f'请求 {url} 失败，状态码: {response.status_code}')
@@ -84,126 +84,116 @@ jobs:
                 print(f'请求 {url} 失败: {e}')
                 continue
 
-        # 已知的CloudFlare IP段和国家对应关系
-        cloudflare_ranges = {
-            # 北美
-            '173.245.48.0/20': '美国',
-            '103.21.244.0/22': '美国',
-            '103.22.200.0/22': '美国',
-            '103.31.4.0/22': '美国',
-            '141.101.64.0/18': '美国',
-            '108.162.192.0/18': '美国',
-            '190.93.240.0/20': '美国',
-            '188.114.96.0/20': '美国',
-            '197.234.240.0/22': '美国',
-            '198.41.128.0/17': '美国',
-            '162.158.0.0/15': '美国',
-            '104.16.0.0/13': '美国',
-            '104.24.0.0/14': '美国',
-            '172.64.0.0/13': '美国',
-            '131.0.72.0/22': '美国',
-            
-            # 欧洲
-            '103.22.200.0/22': '英国',
-            '141.101.64.0/18': '德国',
-            '108.162.192.0/18': '荷兰',
-            '190.93.240.0/20': '荷兰',
-            '188.114.96.0/20': '英国',
-            '197.234.240.0/22': '南非',
-            '198.41.128.0/17': '美国',
-            '162.158.0.0/15': '荷兰',
-            '104.16.0.0/13': '英国',
-            '104.24.0.0/14': '德国',
-            '172.64.0.0/13': '法国',
-            '131.0.72.0/22': '巴西',
-            
-            # 亚洲
-            '103.21.244.0/22': '新加坡',
-            '103.22.200.0/22': '日本',
-            '103.31.4.0/22': '澳大利亚',
-            '141.101.64.0/18': '香港',
-            '108.162.192.0/18': '新加坡',
-            '190.93.240.0/20': '香港',
-            '188.114.96.0/20': '日本',
-            '197.234.240.0/22': '韩国',
-            '198.41.128.0/17': '印度',
-            '162.158.0.0/15': '新加坡',
-            '104.16.0.0/13': '日本',
-            '104.24.0.0/14': '香港',
-            '172.64.0.0/13': '新加坡',
-            '131.0.72.0/22': '澳大利亚'
-        }
-
-        # IP地址转换为整数
-        def ip_to_int(ip):
-            return struct.unpack("!I", socket.inet_aton(ip))[0]
-
-        # 检查IP是否在某个CIDR范围内
-        def is_ip_in_cidr(ip, cidr):
+        # 验证IP地址是否有效的函数
+        def is_valid_ip(ip):
             try:
-                network, bits = cidr.split('/')
-                network_int = ip_to_int(network)
-                ip_int = ip_to_int(ip)
-                mask = (0xFFFFFFFF << (32 - int(bits))) & 0xFFFFFFFF
-                return (ip_int & mask) == (network_int & mask)
-            except:
+                # 检查IP格式是否正确
+                parts = ip.split('.')
+                if len(parts) != 4:
+                    return False
+                
+                # 检查每个部分是否为0-255之间的整数
+                for part in parts:
+                    num = int(part)
+                    if num < 0 or num > 255:
+                        return False
+                
+                # 检查是否为私有IP地址
+                first_octet = int(parts[0])
+                second_octet = int(parts[1])
+                
+                # 私有IP范围:
+                # 10.0.0.0 - 10.255.255.255
+                # 172.16.0.0 - 172.31.255.255
+                # 192.168.0.0 - 192.168.255.255
+                # 127.0.0.0 - 127.255.255.255 (localhost)
+                # 169.254.0.0 - 169.254.255.255 (link-local)
+                if (first_octet == 10 or
+                    (first_octet == 172 and 16 <= second_octet <= 31) or
+                    (first_octet == 192 and second_octet == 168) or
+                    first_octet == 127 or
+                    (first_octet == 169 and second_octet == 254)):
+                    return False
+                
+                # 检查是否为多播地址 (224.0.0.0 - 239.255.255.255)
+                if 224 <= first_octet <= 239:
+                    return False
+                
+                # 检查是否为保留地址 (240.0.0.0 - 255.255.255.254)
+                if first_octet >= 240:
+                    return False
+                
+                return True
+                
+            except (ValueError, IndexError):
                 return False
+
+        # 过滤出有效的公网IP地址
+        valid_ips = set()
+        invalid_ips = set()
+        
+        for ip in all_ips:
+            if is_valid_ip(ip):
+                valid_ips.add(ip)
+            else:
+                invalid_ips.add(ip)
+        
+        print(f'找到 {len(all_ips)} 个IP地址，其中有效公网IP: {len(valid_ips)} 个，无效IP: {len(invalid_ips)} 个')
+        
+        if invalid_ips:
+            print('无效IP地址示例:')
+            for ip in list(invalid_ips)[:10]:  # 只显示前10个无效IP
+                print(f'  {ip}')
 
         # 获取IP地理位置信息的函数
         def get_ip_location(ip):
-            # 首先检查是否是CloudFlare的IP段
-            for cidr, country in cloudflare_ranges.items():
-                if is_ip_in_cidr(ip, cidr):
-                    return f"{ip}#{country}"
-            
-            # 如果不是CloudFlare IP，尝试使用多个API获取位置
-            apis = [
-                f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode",
-                f"https://ipapi.co/{ip}/country_name/",
-                f"http://ipinfo.io/{ip}/country"
-            ]
-            
-            for api_url in apis:
-                try:
-                    time.sleep(0.1)  # 避免请求过于频繁
-                    response = requests.get(api_url, timeout=5)
-                    
-                    if api_url.startswith('http://ip-api.com'):
-                        data = response.json()
-                        if data.get('status') == 'success':
-                            return f"{ip}#{data.get('country', '未知')}"
-                    
-                    elif api_url.startswith('https://ipapi.co'):
-                        country = response.text.strip()
-                        if country and country != 'Undefined':
-                            return f"{ip}#{country}"
-                    
-                    elif api_url.startswith('http://ipinfo.io'):
-                        country = response.text.strip()
-                        if country and country != 'Undefined':
-                            return f"{ip}#{country}"
-                            
-                except:
-                    continue
-            
-            return f"{ip}#未知位置"
+            try:
+                # 使用多个API备用
+                apis = [
+                    f"http://ip-api.com/json/{ip}?fields=status,message,country",
+                    f"https://ipapi.co/{ip}/country_name/",
+                ]
+                
+                for api_url in apis:
+                    try:
+                        time.sleep(0.1)  # 避免请求过于频繁
+                        response = requests.get(api_url, timeout=5)
+                        
+                        if api_url.startswith('http://ip-api.com'):
+                            data = response.json()
+                            if data.get('status') == 'success':
+                                country = data.get('country', '未知')
+                                if country and country != 'Unknown':
+                                    return f"{ip}#{country}"
+                        
+                        elif api_url.startswith('https://ipapi.co'):
+                            country = response.text.strip()
+                            if country and country not in ['Undefined', 'None', '']:
+                                return f"{ip}#{country}"
+                                
+                    except:
+                        continue
+                
+                return f"{ip}#未知位置"
+            except:
+                return f"{ip}#未知位置"
 
-        # 将去重后的IP地址按数字顺序排序并添加位置信息后写入文件
-        if unique_ips:
+        # 将有效的IP地址按数字顺序排序并添加位置信息后写入文件
+        if valid_ips:
             # 按IP地址的数字顺序排序（非字符串顺序）
-            sorted_ips = sorted(unique_ips, key=lambda ip: [int(part) for part in ip.split('.')])
+            sorted_ips = sorted(valid_ips, key=lambda ip: [int(part) for part in ip.split('.')])
             
             # 为每个IP获取地理位置信息
             ip_with_location = []
             for ip in sorted_ips:
                 location = get_ip_location(ip)
                 ip_with_location.append(location)
-                print(f"获取 {ip} 的地理位置信息: {location.split('#')[1]}")
+                print(f"处理: {location}")
             
             with open('ip.txt', 'w') as file:
                 for ip_line in ip_with_location:
                     file.write(ip_line + '\n')
-            print(f'已保存 {len(ip_with_location)} 个带位置信息的IP地址到ip.txt文件。')
+            print(f'已保存 {len(ip_with_location)} 个有效的带位置信息的IP地址到ip.txt文件。')
         else:
             print('未找到有效的IP地址。')
             # 创建一个空文件，避免后续步骤出错
