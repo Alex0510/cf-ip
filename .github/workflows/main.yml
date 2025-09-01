@@ -37,13 +37,14 @@ jobs:
         cat > fetch_ips.py << 'EOF'
         import requests
         import re
+        import json
         import os
 
         # 目标URL列表
         urls = [
-            'https://ip.164746.xyz', 
+            'https://ip.164746.xyz/ipTop10.html', 
             'https://cf.090227.xyz', 
-            'https://stock.hostmonit.com/CloudFlareYes',
+            'https://ipdb.api.030101.xyz/?type=bestcf&country=true',
             'https://www.wetest.vip/page/cloudflare/address_v4.html'
         ]
 
@@ -53,7 +54,47 @@ jobs:
         # 使用集合存储IP地址实现自动去重
         unique_ips = set()
 
-        for url in urls:
+        # 处理 https://cf.090227.xyz 的特殊逻辑
+        cf_url = 'https://cf.090227.xyz'
+        try:
+            # 添加User-Agent头以避免被某些网站阻止
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            # 发送HTTP请求获取网页内容
+            response = requests.get(cf_url, headers=headers, timeout=10)
+            
+            # 确保请求成功
+            if response.status_code == 200:
+                # 尝试解析JSON数据
+                try:
+                    data = response.json()
+                    # 提取测速大于0的IP地址
+                    for item in data:
+                        if 'ip' in item and 'speed' in item:
+                            try:
+                                speed = float(item['speed'])
+                                if speed > 0:
+                                    unique_ips.add(item['ip'])
+                            except (ValueError, TypeError):
+                                # 如果speed不是数字，跳过此项
+                                continue
+                    print(f'从 {cf_url} 找到 {len([item for item in data if "ip" in item and "speed" in item and float(item.get("speed", 0)) > 0])} 个测速大于0的IP地址')
+                except json.JSONDecodeError:
+                    # 如果不是JSON格式，回退到正则表达式匹配
+                    html_content = response.text
+                    ip_matches = re.findall(ip_pattern, html_content, re.IGNORECASE)
+                    unique_ips.update(ip_matches)
+                    print(f'从 {cf_url} 找到 {len(ip_matches)} 个IP地址（使用正则匹配）')
+            else:
+                print(f'请求 {cf_url} 失败，状态码: {response.status_code}')
+        except requests.exceptions.RequestException as e:
+            print(f'请求 {cf_url} 失败: {e}')
+
+        # 处理其他URL（使用常规方法）
+        other_urls = [url for url in urls if url != cf_url]
+        for url in other_urls:
             try:
                 # 添加User-Agent头以避免被某些网站阻止
                 headers = {
